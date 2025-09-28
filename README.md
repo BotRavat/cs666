@@ -1,4 +1,4 @@
-# CS666 - Hardware and IoT Security
+# CS666: HARDWARE SECURITY OF INTERNET OF THINGS
 
 ## Assignments
 - **A1: Pipelined AES Implementation**  
