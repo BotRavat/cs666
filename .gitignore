@@ -1,0 +1,8 @@
+# Ignore big datasets
+A2_cpa_aes/data/
+*.csv
+
+# Ignore generated plots/results
+A2_cpa_aes/results/
+*.png
+*.log
