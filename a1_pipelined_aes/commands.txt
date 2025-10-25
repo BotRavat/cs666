@@ -1,0 +1,36 @@
+iverilog -o aes_sim \
+    src/test_AES128.v \
+    src/AESEncrypt.v \
+    src/AddRoundKey.v \
+    src/KeyExpansion.v \
+    src/MixColumns.v \
+    src/ShiftRows.v \
+    src/SubBytes.v \
+    src/SubTable.v
+
+
+
+
+    yosys -s synth_aes.ys
+
+
+stat -top AESEncrypt128_DUT > ./src/reports/AESEncrypt128_DUT_report.txt
+
+
+
+#synth_aes.sh
+# Read only RTL modules, exclude testbench
+read_verilog ./src/SubTable.v
+read_verilog ./src/SubBytes.v
+read_verilog ./src/ShiftRows.v
+read_verilog ./src/MixColumns.v
+read_verilog ./src/AddRoundKey.v
+read_verilog ./src/KeyExpansion.v
+read_verilog ./src/AESEncrypt.v
+
+# Top module
+synth -top AESEncrypt128_DUT
+
+# Write netlist & report
+write_verilog ./src/reports/AESEncrypt128_DUT_netlist.v
+stat -top AESEncrypt128_DUT > ./src/reports/AESEncrypt128_DUT_report.txt
