@@ -1,8 +1,6 @@
 #!/bin/bash
 # ==================================================
 # AES-128 RTL Simulation & Synthesis Automation
-# Interactive steps: compile -> simulate -> synth
-# Reports and netlists go to src/reports
 # ==================================================
 
 SRC_DIR="./src"
@@ -10,38 +8,44 @@ REPORT_DIR="$SRC_DIR/reports"
 SIM_OUT="aes_sim"
 
 # Create reports directory if missing
-mkdir -p $REPORT_DIR
+mkdir -p "$REPORT_DIR"
+
+# Set Pipelined Metrics for Reporting (Theoretical)
+TARGET_FMAX_MHZ=200      # Target Frequency for a pipelined design
+DATA_BITS=128            # AES-128 data width
+CYCLES_PER_BLOCK=1       # Fully pipelined throughput
+
+SUMMARY_FILE="$REPORT_DIR/aes_summary.txt"
+REPORT_FILE="$REPORT_DIR/AESEncrypt128_DUT_report.txt"
+YOSYS_SYNTH_SCRIPT="synth_netlist.ys"
 
 # -------------------------------
 # Step 1: Compile & simulate RTL
 # -------------------------------
 echo "=== Step 1: Compiling and simulating AES-128 RTL ==="
-iverilog -o $SIM_OUT \
-    $SRC_DIR/test_AES128.v \
-    $SRC_DIR/AESEncrypt.v \
-    $SRC_DIR/AddRoundKey.v \
-    $SRC_DIR/KeyExpansion.v \
-    $SRC_DIR/MixColumns.v \
-    $SRC_DIR/ShiftRows.v \
-    $SRC_DIR/SubBytes.v \
-    $SRC_DIR/SubTable.v
+iverilog -o "$SIM_OUT" \
+    "$SRC_DIR"/test_AES128.v \
+    "$SRC_DIR"/AESEncrypt.v \
+    "$SRC_DIR"/AddRoundKey.v \
+    "$SRC_DIR"/KeyExpansion.v \
+    "$SRC_DIR"/MixColumns.v \
+    "$SRC_DIR"/ShiftRows.v \
+    "$SRC_DIR"/SubBytes.v \
+    "$SRC_DIR"/SubTable.v
 
 echo "Running simulation..."
-vvp $SIM_OUT
+vvp "$SIM_OUT"
 
 echo "Simulation complete. Above shows encryption result."
 read -p "Press ENTER to continue to synthesis, or Ctrl+C to abort..."
 
 # -------------------------------
-# Step 2: Synthesis with Yosys (Netlist Generation)
+# Step 2: Synthesis with Yosys
 # -------------------------------
 echo "=== Step 2a: Generating Netlist using Yosys ==="
 
-YOSYS_SYNTH_SCRIPT="synth_netlist.ys"
-REPORT_FILE="$REPORT_DIR/AESEncrypt128_DUT_report.txt"
-
 # Create script to load files and synthesize
-cat > $YOSYS_SYNTH_SCRIPT <<EOL
+cat > "$YOSYS_SYNTH_SCRIPT" <<EOL
 # Read only RTL modules, exclude testbench
 read_verilog $SRC_DIR/SubTable.v
 read_verilog $SRC_DIR/SubBytes.v
@@ -54,12 +58,12 @@ read_verilog $SRC_DIR/AESEncrypt.v
 # Top module
 synth -top AESEncrypt128_DUT
 
-# Write netlist (this worked previously)
+# Write netlist 
 write_verilog $REPORT_DIR/AESEncrypt128_DUT_netlist.v
 EOL
 
-# Run Yosys for synthesis
-if ! yosys -s $YOSYS_SYNTH_SCRIPT; then
+# Run Yosys for netlist generation
+if ! yosys -s "$YOSYS_SYNTH_SCRIPT"; then
     echo "Error: Yosys netlist synthesis failed! Check Verilog RTL syntax."
     exit 1
 fi
@@ -71,84 +75,78 @@ echo "Netlist generated successfully: $REPORT_DIR/AESEncrypt128_DUT_netlist.v"
 # -------------------------------
 echo "=== Step 2b: Generating Synthesis Report (Statistics) ==="
 
-# We run Yosys again, but only with the 'stat' command piped directly to the file.
-# This prevents the C++ crash from aborting the entire script.
-# We include the 'hierarchy' command to ensure the grand totals are printed at the end.
+# Run Yosys again for the 'stat' command, piping output to the report file.
 if ! yosys -p "read_verilog $REPORT_DIR/AESEncrypt128_DUT_netlist.v; hierarchy -top AESEncrypt128_DUT; stat" > "$REPORT_FILE"; then
-    # Note: If it crashes here, the error is still in Yosys's stat calculation,
-    # but the synthesis is considered complete.
     echo "Warning: Yosys 'stat' command failed to generate a complete report. Proceeding with summary generation."
 fi
 
 echo "Synthesis complete. Netlist and report generated in $REPORT_DIR."
-# read -p "Press ENTER to generate summary, or Ctrl+C to abort..."
 
 # -------------------------------
-# Step 3: Generate modular summary
+# Step 3: Generate modular summary and Pipelined Metrics
 # -------------------------------
-SUMMARY_FILE="$REPORT_DIR/aes_summary.txt"
-> $SUMMARY_FILE
-echo "=== AES-128 Synthesis Summary ===" >> $SUMMARY_FILE
-echo "Generated on $(date)" >> $SUMMARY_FILE
-echo "" >> $SUMMARY_FILE
 
-REPORTS=("$REPORT_FILE")
+# Create the summary file (using quotes for robustness)
+> "$SUMMARY_FILE"
+echo "=== AES-128 Synthesis Summary ===" >> "$SUMMARY_FILE"
+echo "Generated on $(date)" >> "$SUMMARY_FILE"
+echo "" >> "$SUMMARY_FILE"
 
-for FILE in "${REPORTS[@]}"; do
-    if [ ! -f "$FILE" ]; then
-        echo "Warning: Report $FILE not found! Skipping..."
-        # We will stop here if the report file is missing entirely after the crash warning
-        continue
-    fi
-
-    MODULE_NAME=$(basename $FILE | sed 's/_report.txt//')
+if [ ! -f "$REPORT_FILE" ]; then
+    echo "Error: Final Yosys report file not found at $REPORT_FILE. Cannot generate summary." >> "$SUMMARY_FILE"
+else
     
-    # --- Extraction Fixes ---
-    # The 'design hierarchy' section is the last complete stats block. 
-    # Using 'tail -n 1' on general pattern is brittle. We will use it, but assume the last block is the hierarchy.
+    FILE="$REPORT_FILE"
+    MODULE_NAME=$(basename "$FILE" | sed 's/_report.txt//')
     
+    # --- Resource Extraction ---
+    # NOTE: These grep/awk patterns rely on the specific Yosys output format.
     # Wires, WireBits, Cells: Target the last instance of these lines.
-    Wires=$(grep "Number of wires:" $FILE | awk '{print $4}' | tail -n 1)
-    WireBits=$(grep "Number of wire bits:" $FILE | awk '{print $5}' | tail -n 1)
-    Cells=$(grep "Number of cells:" $FILE | awk '{print $4}' | tail -n 1)
+    Wires=$(grep "Number of wires:" "$FILE" | awk '{print $4}' | tail -n 1)
+    WireBits=$(grep "Number of wire bits:" "$FILE" | awk '{print $5}' | tail -n 1)
+    Cells=$(grep "Number of cells:" "$FILE" | awk '{print $4}' | tail -n 1)
     
     # LUTs: Using $_ANDNOT_ as a proxy, targeting the last instance (from hierarchy total)
-    LUTs=$(grep "\$_ANDNOT_" $FILE | awk '{print $2}' | tail -n 1)
+    LUTs=$(grep "\$_ANDNOT_" "$FILE" | awk '{print $2}' | tail -n 1)
 
-    # Flip-Flops: Sum ALL $_DFFE_ cells in the report (FFs, FFs with set/reset, etc.)
-    # This uses awk to initialize a sum (s=0) and for every line matching $DFFE, it adds the cell count ($2)
-    FFs=$(grep "\$_DFFE_" $FILE | awk '{s+=$2} END {print s}')
+    # Flip-Flops: Sum ALL $_DFFE_ cells in the report
+    FFs=$(grep "\$_DFFE_" "$FILE" | awk '{s+=$2} END {print s}')
 
     # BRAMs and DSPs: Target the last instance.
-    BRAMs=$(grep "\$_MEM_" $FILE | awk '{print $2}' | tail -n 1)
-    DSPs=$(grep "\$_DSP_" $FILE | awk '{print $2}' | tail -n 1)
+    BRAMs=$(grep "\$_MEM_" "$FILE" | awk '{print $2}' | tail -n 1)
+    DSPs=$(grep "\$_DSP_" "$FILE" | awk '{print $2}' | tail -n 1)
     
     BRAMs=${BRAMs:-0}
     DSPs=${DSPs:-0}
-    Throughput=$(echo "scale=2; 128*100000000/10" | bc)
-
-    # Fallback/Sanitization for missing values after grep
+    
+    # Fallback/Sanitization
     Wires=${Wires:-0}
     WireBits=${WireBits:-0}
     Cells=${Cells:-0}
     LUTs=${LUTs:-0}
     FFs=${FFs:-0}
 
+    # --- Calculation of Pipelined Metrics ---
+    # Theoretical Throughput Calculation (in Gbps)
+    # Formula: (Target Fmax (MHz) * Data Bits) / (Cycles per Block * 1000) = Gbps
+    Throughput_Gbps=$(echo "scale=2; ${TARGET_FMAX_MHZ} * ${DATA_BITS} / (${CYCLES_PER_BLOCK} * 1000)" | bc)
 
-    echo "Module: $MODULE_NAME" >> $SUMMARY_FILE
-    echo "---------------------------------" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Parameter" "Value" >> $SUMMARY_FILE
-    echo "---------------------------------" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Wires" "$Wires" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Wire bits" "$WireBits" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Cells" "$Cells" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "LUTs" "$LUTs" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Flip-Flops" "$FFs" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "BRAMs" "$BRAMs" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "DSPs" "$DSPs" >> $SUMMARY_FILE
-    printf "| %-12s | %-10s |\n" "Throughput" "${Throughput} bps" >> $SUMMARY_FILE
-    echo "---------------------------------" >> $SUMMARY_FILE
-    echo "" >> $SUMMARY_FILE
-done
+    echo "Module: $MODULE_NAME (Fully Pipelined)" >> "$SUMMARY_FILE"
+    echo "---------------------------------" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Parameter" "Value" >> "$SUMMARY_FILE"
+    echo "---------------------------------" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Total LUTs (Area)" "$LUTs" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Total Flip-Flops" "$FFs" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "BRAMs / DSPs" "$BRAMs / $DSPs" >> "$SUMMARY_FILE"
+    echo "---------------------------------" >> "$SUMMARY_FILE"
+    
+    # Pipelined Metrics
+    echo "| **Pipelined Performance** | **(Theoretical)** |" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Target Fmax" "${TARGET_FMAX_MHZ} MHz" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Cycles per Block" "$CYCLES_PER_BLOCK" >> "$SUMMARY_FILE"
+    printf "| %-18s | %-12s |\n" "Throughput" "${Throughput_Gbps} Gbps" >> "$SUMMARY_FILE"
+    echo "---------------------------------" >> "$SUMMARY_FILE"
+    echo "" >> "$SUMMARY_FILE"
+fi
 
 echo "Done! Check $SUMMARY_FILE for synthesis summary."
