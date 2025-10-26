@@ -1,89 +1,100 @@
-module KeyExpansionRound #(parameter Nk = 4, parameter Nr = 10) (roundCount, keyIn, keyOut);
-    input [3:0] roundCount;
-    input [32 * Nk - 1:0] keyIn;
+`timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Engineer: 
+// Design Name: AES-128 Sequential Key Expansion
+// Description: Sequential version of KeyExpansion to reduce critical path delay.
+//              Generates one round key per clock cycle.
+//////////////////////////////////////////////////////////////////////////////////
 
-    output [32 * Nk - 1:0] keyOut;
+module KeyExpansionRound (
+    input  wire [3:0]  roundCount,
+    input  wire [127:0] keyIn,
+    output reg  [127:0] keyOut
+);
+    integer i;
+    wire [31:0] w [0:3];
+    wire [31:0] w_sub, w_rot, w_rcon;
+    wire [7:0] rcon_byte;
 
-    genvar i;
+    // Split input key into 4 words
+    assign {w[0], w[1], w[2], w[3]} = keyIn;
 
-    // Split the key into Nk words
-    wire [31:0] words[Nk - 1:0];
+    // Rotate last word
+    assign w_rot = {w[3][23:0], w[3][31:24]};
 
+    // SubWord using S-box
+    wire [31:0] w_sub_temp;
+    genvar j;
     generate
-        for (i = 0; i < Nk; i = i + 1) begin: KeySplitLoop
-            assign words[i] = keyIn[(32 * Nk - 1) - i * 32 -: 32];
+        for (j = 0; j < 4; j = j + 1) begin : SBOX_SUB
+            SubTable sbox_inst (w_rot[8*j +: 8], w_sub_temp[8*j +: 8]);
         end
     endgenerate
 
-    // Rotate the words (rotWord)
-    wire [31:0] w3Rot = {words[Nk - 1][23:0], words[Nk - 1][31:24]};
+    // Round constant selection
+    assign rcon_byte = (roundCount == 1) ? 8'h01 :
+                       (roundCount == 2) ? 8'h02 :
+                       (roundCount == 3) ? 8'h04 :
+                       (roundCount == 4) ? 8'h08 :
+                       (roundCount == 5) ? 8'h10 :
+                       (roundCount == 6) ? 8'h20 :
+                       (roundCount == 7) ? 8'h40 :
+                       (roundCount == 8) ? 8'h80 :
+                       (roundCount == 9) ? 8'h1b :
+                       (roundCount == 10)? 8'h36 : 8'h00;
+    assign w_rcon = {rcon_byte, 24'h000000};
 
-    // Perform the substitution of the words (subWord)
-    wire [31:0] w3Sub;
+    // Compute next round key combinationally
+    wire [31:0] t0 = w[0] ^ w_sub_temp ^ w_rcon;
+    wire [31:0] t1 = w[1] ^ t0;
+    wire [31:0] t2 = w[2] ^ t1;
+    wire [31:0] t3 = w[3] ^ t2;
 
-    generate 
-        for (i = 0; i < 4; i = i + 1) begin: SubWordLoop
-            SubTable subTable(w3Rot[8 * i +: 8], w3Sub[8 * i +: 8]);
-        end
-    endgenerate
-
-    // Perform the XOR operation with the round constant (roundConstant)
-    wire [7:0] roundConstantStart = roundCount == 1 ? 8'h01
-                                        : roundCount == 2 ? 8'h02
-                                        : roundCount == 3 ? 8'h04
-                                        : roundCount == 4 ? 8'h08
-                                        : roundCount == 5 ? 8'h10
-                                        : roundCount == 6 ? 8'h20
-                                        : roundCount == 7 ? 8'h40
-                                        : roundCount == 8 ? 8'h80
-                                        : roundCount == 9 ? 8'h1b
-                                        : roundCount == 10 ? 8'h36
-                                        : roundCount == 11 ? 8'h6c
-                                        : roundCount == 12 ? 8'hd8
-                                        : roundCount == 13 ? 8'hab
-                                        : roundCount == 14 ? 8'h4d
-                                        : roundCount == 15 ? 8'h9a
-                                        : roundCount == 16 ? 8'h2f
-                                        : 8'h00;
-    wire [31:0] roundConstant = {roundConstantStart, 24'h00};
-
-    assign keyOut[32 * Nk - 1 -: 32] = words[0] ^ w3Sub ^ roundConstant; // XOR the first word with the round constant
-
-    // Perform SubWord transformation for i % Nk work (256 bits key only)
-    wire [31:0] wSub;
-    generate 
-        for (i = 0; i < 4; i = i + 1) begin: SubWordLoopForWSub
-            SubTable subTable(keyOut[(32 * Nk - 1) - 3 * 32 - i * 8 -: 8], wSub[(3 - i) * 8 +: 8]);
-        end
-    endgenerate
-
-    generate
-        for (i = 1; i < Nk; i = i + 1) begin: KeyExpansionLoop
-            assign keyOut[(32 * Nk - 1) - i * 32 -: 32] = words[i] ^ (Nk == 8 && i == 4 ? wSub : keyOut[(32 * Nk - 1) - (i - 1) * 32 -: 32]); // XOR word i with word i - 1
-        end
-    endgenerate
+    always @(*) begin
+        keyOut = {t0, t1, t2, t3};
+    end
 endmodule
 
-module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (keyIn, keysOut);    
-    localparam rounds = (Nr == 10 ? 9 : (Nr == 12 ? 7 : 6));
 
-    input [(Nk * 32) - 1:0] keyIn;
-    output  [((Nr + 1) * 128) - 1:0] keysOut;
+//////////////////////////////////////////////////////////////////////////////////
+// Sequential Key Expansion Controller
+//////////////////////////////////////////////////////////////////////////////////
+module KeyExpansion #(
+    parameter Nk = 4,
+    parameter Nr = 10
+)(
+    input  wire         clk,
+    input  wire         reset,
+    input  wire [127:0] keyIn,
+    output reg  [127:0] roundKey,
+    output reg  [3:0]   roundCount,
+    output reg          valid
+);
 
-    assign keysOut[((Nr + 1) * 128) - 1 -: (Nk * 32)] = keyIn;
+    // Internal storage for current key
+    reg [127:0] currentKey;
+    wire [127:0] nextKey;
 
-    // Perform the key expansion rounds (KeyExpansionRound)
-    genvar i;
-    generate
-        for (i = 0; i < rounds; i = i + 1) begin: KeyExpansionRoundLoop
-            KeyExpansionRound #(Nk, Nr) keyExpansionRound(i[3:0] + 4'b0001, keysOut[((Nr + 1) * 128) - 1 - i * (Nk * 32) -: (Nk * 32)], keysOut[((Nr + 1) * 128) - 1 - (i + 1) * (Nk * 32) -: (Nk * 32)]);
+    // Instantiate one round generator
+    KeyExpansionRound roundGen (
+        .roundCount(roundCount),
+        .keyIn(currentKey),
+        .keyOut(nextKey)
+    );
+
+    // Sequential control
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            currentKey <= keyIn;
+            roundKey   <= keyIn;
+            roundCount <= 4'd1;
+            valid      <= 1'b1; // first key valid immediately
+        end else begin
+            currentKey <= nextKey;
+            roundKey   <= nextKey;
+            valid      <= 1'b1;
+            roundCount <= roundCount + 1;
         end
-    endgenerate
+    end
 
-    // Perform the last key expansion round (LastKeyExpansionRound)
-    wire [Nk * 32 - 1:0] lastkey;
-    KeyExpansionRound #(Nk, Nr) lastKeyExpansionRound(rounds[3:0] + 4'b0001, keysOut[128 +: (Nk * 32)], lastkey);
-
-    assign keysOut[127:0] = lastkey[Nk * 32 - 1 -: 128];
 endmodule
-
