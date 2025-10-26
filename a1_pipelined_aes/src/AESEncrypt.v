@@ -66,53 +66,6 @@ module AESEncrypt (data, allKeys, state, clk, reset, done);
             );
             
             // MixColumns (data_in, data_out)￼
-t
-Add file￼
-Add file
-More options￼
-Latest commit
-￼
-aneels3
-Update mux.v
-c0fa561
- · 
-7 years ago
-History
-History
-Folders and files
-Name	Last commit message	Last commit date
-parent directory
-..
-AES_Encryption.v
-Update AES_Encryption.v
-7 years ago
-DFF_128.v
-Add files via upload
-7 years ago
-Key.v
-Update Key.v
-7 years ago
-MUX2_1.v
-Add files via upload
-7 years ago
-Mix_Column.v
-Add files via upload
-7 years ago
-Round_reg.v
-Update Round_reg.v
-7 years ago
-Shift_Rows.v
-Update Shift_Rows.v
-7 years ago
-Sub_Bytes.v
-Add files via upload
-7 years ago
-Sub_Key.v
-Add files via upload
-7 years ago
-mux.v
-Update mux.v
-7 years ago
 
             MixColumns mix (
                 shiftRowsWire[i],   // 1. data_in
@@ -122,7 +75,7 @@ Update mux.v
             // AddRoundKey (data_in, round_key, data_out)
             AddRoundKey addkey (
                 mixColumnsWire[i],                      // 1. data_in
-                allKeys[((Nr - i) * 128) +: 128],       // 2. round_key (Key i)
+                allKeys[((Nr-i) * 128) +: 128],       // 2. round_key (Key i)
                 stateOut[i]                             // 3. data_out
             );
 
@@ -167,17 +120,43 @@ Update mux.v
     // =======================================================
     // 3. Final Output Register and Done Signal
     // =======================================================
+   reg [3:0] round_counter;
+    reg done_internal;
+
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            state <= 128'h0;
-            done <= 0;
+            round_counter <= 0;
+            done_internal <= 0;
+            done <= 0; // 'done' is now a registered output
         end else begin
-            // Final output register (Latency is Nr + 1 cycles)
-            state <= stateOut[Nr];
-            // 'done' signal indicates the first block is complete and output is valid
-            done <= 1; 
+            // This counter logic just tracks the pipeline fill
+            if (round_counter < Nr + 1) begin
+                round_counter <= round_counter + 1;
+            end
+            
+            // When counter becomes 10 (end of clk 10), set the internal flag
+            if (round_counter == Nr) begin
+                done_internal <= 1;
+            end
+            
+            // Register the internal flag to the output 'done'
+            // 'done' will now become 1 at the END of clk 11
+            done <= done_internal;
         end
     end
+
+// =======================================================
+// 4. Final Output Register Assignment
+// =======================================================
+always @(posedge clk or posedge reset) begin
+    if (reset) begin
+        state <= 128'h0;
+    end else begin
+        state <= stateOut[Nr];
+    end
+end
+
+
 
 endmodule
 
