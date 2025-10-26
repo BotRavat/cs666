@@ -86,4 +86,3 @@ module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (keyIn, keysOut);
 
     assign keysOut[127:0] = lastkey[Nk * 32 - 1 -: 128];
 endmodule
-
