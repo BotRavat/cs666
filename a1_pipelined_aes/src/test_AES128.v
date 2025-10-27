@@ -19,9 +19,9 @@ module test_AES128();
 
     reg  [127:0] data;
     reg  [127:0] key;
-    reg          clk, reset;
+    reg clk, reset;
     wire [127:0] out;
-    wire         done;
+    wire done;
 
     // DUT Instance
     AESEncrypt128_DUT aes (
@@ -42,6 +42,7 @@ module test_AES128();
     // Test Vectors
     reg [127:0] data_vec [0:NUM_BLOCKS-1];
     reg [127:0] out_vec  [0:NUM_BLOCKS-1];
+    reg [127:0] expected_cipher [0:NUM_BLOCKS-1];
     integer i;
 
     initial begin
@@ -52,6 +53,23 @@ module test_AES128();
         data_vec[0] = 128'h00112233445566778899aabbccddeeff;
         for (i = 1; i < NUM_BLOCKS; i = i + 1)
             data_vec[i] = data_vec[i-1] ^ (128'h01010101010101010101010101010101 * i);
+            
+             // Expected Ciphertexts ( plain text cipher pair avalaible in ciphers.txt file)
+        expected_cipher[0]  = 128'h69c4e0d86a7b0430d8cdb78070b4c55a;
+        expected_cipher[1]  = 128'ha9541c06f1c21125e44013531e18f406;
+        expected_cipher[2]  = 128'h042735ab9246a07bdeb21dfeb6ad1192;
+        expected_cipher[3]  = 128'h69c4e0d86a7b0430d8cdb78070b4c55a;
+        expected_cipher[4]  = 128'h9662f54d756d02c274271598b73e0da6;
+        expected_cipher[5]  = 128'ha9541c06f1c21125e44013531e18f406;
+        expected_cipher[6]  = 128'h4605a49219c3459631f29dcff0a6f7da;
+        expected_cipher[7]  = 128'h69c4e0d86a7b0430d8cdb78070b4c55a;
+        expected_cipher[8]  = 128'hbcb2935cec550e9fc91d45ebcf9d3c91;
+        expected_cipher[9]  = 128'ha9541c06f1c21125e44013531e18f406;
+        expected_cipher[10] = 128'h6f7f9d8d39be19e94064cc1e9f0c0eb4;
+        expected_cipher[11] = 128'h69c4e0d86a7b0430d8cdb78070b4c55a;
+        expected_cipher[12] = 128'h73e392a54e42743b613ef53c1c6a25f7;
+        expected_cipher[13] = 128'ha9541c06f1c21125e44013531e18f406;
+        expected_cipher[14] = 128'ha3b364bf5b70887b3b3fd6e5e47baefd;
     end
 
     // Tracking variables
@@ -87,8 +105,14 @@ module test_AES128();
         if (!reset && done) begin
             out_vec[output_index] = out;
             if (output_index == 0) first_out_time = $time;
-            $display("Output #%0d ready @ %0t ns : %032x",
-                      output_index, $time, out);
+
+            if (out === expected_cipher[output_index])
+                $display("Output #%0d ready @ %0t ns : %032x  --> Correct ✅",
+                          output_index, $time, out);
+            else
+                $display("Output #%0d ready @ %0t ns : %032x  --> Incorrect ❌ (Expected: %032x)",
+                          output_index, $time, out, expected_cipher[output_index]);
+
             output_index = output_index + 1;
         end
     end
