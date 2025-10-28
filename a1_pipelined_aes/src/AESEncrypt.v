@@ -10,103 +10,97 @@ module AESEncrypt (data, allKeys, state, clk, reset, done);
     output reg done;
     output reg [127:0] state;
 
-    // =======================================================
-    // NEW: Enhanced Pipeline Registers for 2-Stage Inner Pipeline
-    // =======================================================
-    
-    // Outer pipeline registers (after complete rounds)
-    reg [127:0] round_stage [0:Nr-1]; 
-    
-    // NEW: Inner pipeline registers (after SubBytes+ShiftRows for rounds 1-9)
-    reg [127:0] sub_shift_stage [0:Nr-2]; // 9 registers
+   
+     // ----------------------------
+    // Pipeline Registers
+    // ----------------------------
+    reg [127:0] round_stage [0:Nr-1];       // Outer stage after full round
+    reg [127:0] subbyte_stage [0:Nr-2];     // Stage 1: After SubBytes
+    reg [127:0] shift_mix_stage [0:Nr-2];   // Stage 2: After ShiftRows+MixColumns
 
-    // Wires for each of the 10 rounds
+    // Wires
     wire [127:0] subByteWire [1:Nr];
     wire [127:0] shiftRowsWire [1:Nr];
     wire [127:0] mixColumnsWire [1:Nr-1];
     wire [127:0] stateOut [0:Nr];
 
-    // =======================================================
-    // 0. Initial Round (AddRoundKey only - Stage 0)
-    // =======================================================
+    // ----------------------------
+    // 0. Initial Round: AddRoundKey
+    // ----------------------------
     AddRoundKey addkey_0 (
         data,
-        allKeys[((Nr + 1) * 128) - 128 +: 128],
+        allKeys[((Nr+1)*128)-1 -: 128], // highest round key first
         stateOut[0]
     );
 
     always @(posedge clk or posedge reset) begin
-        if (reset) begin
+        if(reset)
             round_stage[0] <= 128'h0;
-        end else begin
+        else
             round_stage[0] <= stateOut[0];
-        end
     end
 
-    // =======================================================
-    // 1. Modified Pipeline Stages (Round 1 to Round 9) with 2-Stage Inner Pipeline
-    // =======================================================
+    // ----------------------------
+    // 1. Rounds 1 to Nr-1
+    // ----------------------------
+    genvar i;
     generate
-        genvar i;
-        for (i = 1; i <= Nr - 1; i = i + 1) begin : round_i
-            
-            // --- STAGE 1: SubBytes + ShiftRows ---
-            // Input comes from the previous outer register stage: round_stage[i-1]
-            
+        for(i = 1; i <= Nr-1; i=i+1) begin: rounds
+            // Stage 1: SubBytes
             SubBytes sub (
                 round_stage[i-1],
                 subByteWire[i]
             );
-            
+
+            always @(posedge clk or posedge reset) begin
+                if(reset)
+                    subbyte_stage[i-1] <= 128'h0;
+                else
+                    subbyte_stage[i-1] <= subByteWire[i];
+            end
+
+            // Stage 2: ShiftRows + MixColumns
             ShiftRows shft (
-                subByteWire[i],
+                subbyte_stage[i-1],
                 shiftRowsWire[i]
             );
-            
-            // NEW: First inner pipeline register (after SubBytes+ShiftRows)
-            always @(posedge clk or posedge reset) begin
-                if (reset) begin
-                    sub_shift_stage[i-1] <= 128'h0;
-                end else begin
-                    sub_shift_stage[i-1] <= shiftRowsWire[i];
-                end
-            end
-            
-            // --- STAGE 2: MixColumns + AddRoundKey ---
-            // Input comes from the inner pipeline register: sub_shift_stage[i-1]
-            
+
             MixColumns mix (
-                sub_shift_stage[i-1],
+                shiftRowsWire[i],
                 mixColumnsWire[i]
             );
-            
+
+            always @(posedge clk or posedge reset) begin
+                if(reset)
+                    shift_mix_stage[i-1] <= 128'h0;
+                else
+                    shift_mix_stage[i-1] <= mixColumnsWire[i];
+            end
+
+            // Stage 3: AddRoundKey
             AddRoundKey addkey (
-                mixColumnsWire[i],
-                allKeys[((Nr-i) * 128) +: 128],
+                shift_mix_stage[i-1],
+                allKeys[((Nr-i+1)*128)-1 -: 128], // next highest round key
                 stateOut[i]
             );
 
-            // Outer pipeline register (after complete round)
             always @(posedge clk or posedge reset) begin
-                if (reset) begin
+                if(reset)
                     round_stage[i] <= 128'h0;
-                end else begin
+                else
                     round_stage[i] <= stateOut[i];
-                end
             end
         end
     endgenerate
 
-    // =======================================================
-    // 2. Final Round (Round 10 - Skips MixColumns)
-    // =======================================================
-    // Note: Final round doesn't need inner pipelining since it skips MixColumns
-    
+    // ----------------------------
+    // 2. Final Round: Nr (SubBytes -> ShiftRows -> AddRoundKey)
+    // ----------------------------
     SubBytes sub_final (
         round_stage[Nr-1],
         subByteWire[Nr]
     );
-    
+
     ShiftRows shft_final (
         subByteWire[Nr],
         shiftRowsWire[Nr]
@@ -114,51 +108,40 @@ module AESEncrypt (data, allKeys, state, clk, reset, done);
 
     AddRoundKey addkey_final (
         shiftRowsWire[Nr],
-        allKeys[0 +: 128],
+        allKeys[0 +: 128], // lowest round key last
         stateOut[Nr]
     );
 
-    // =======================================================
-    // 3. Enhanced Control Logic for Extended Pipeline
-    // =======================================================
-    // NEW: Extended counter to handle 20 pipeline stages (was 11)
-    reg [4:0] round_counter;  // Expanded from 4 to 5 bits
-    reg done_internal;
-
+    // ----------------------------
+    // 3. Control Logic
+    // ----------------------------
+    reg [5:0] cycle_count;
     always @(posedge clk or posedge reset) begin
-        if (reset) begin
-            round_counter <= 0;
-            done_internal <= 0;
+        if(reset) begin
+            cycle_count <= 0;
             done <= 0;
         end else begin
-            // NEW: Count up to 20 cycles total pipeline depth
-            if (round_counter < (Nr * 2)) begin  // 10 rounds * 2 stages = 20
-                round_counter <= round_counter + 1;
-            end
-            
-            // NEW: Set done when counter reaches 19 (end of cycle 19)
-            if (round_counter == (Nr * 2 - 1)) begin  // 20 - 1 = 19
-                done_internal <= 1;
-            end
-            
-            done <= done_internal;
+            cycle_count <= cycle_count + 1;
+            if(cycle_count >= (Nr-1)*3 + 2) // pipeline full
+                done <= 1;
         end
     end
 
-    // =======================================================
-    // 4. Final Output Register Assignment
-    // =======================================================
+    // ----------------------------
+    // 4. Final Output
+    // ----------------------------
     always @(posedge clk or posedge reset) begin
-        if (reset) begin
+        if(reset)
             state <= 128'h0;
-        end else begin
+        else
             state <= stateOut[Nr];
-        end
     end
+
+
 
 endmodule
 
-// DUT module remains unchanged
+
 module AESEncrypt128_DUT(data, key, clk, reset, out, done);
     parameter Nk = 4;
     parameter Nr = 10;
@@ -171,7 +154,7 @@ module AESEncrypt128_DUT(data, key, clk, reset, out, done);
     
     wire [((Nr + 1) * 128) - 1:0] allKeys;
 
-    KeyExpansion #(.Nk(Nk), .Nr(Nr)) ke(key, allKeys);
+    KeyExpansion #(.Nk(Nk), .Nr(Nr)) ke(clk, reset, key, allKeys);
     AESEncrypt #(.Nk(Nk), .Nr(Nr)) aes_enc(data, allKeys, out, clk, reset, done);
 
 endmodule

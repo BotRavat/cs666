@@ -1,145 +1,102 @@
 module KeyExpansionRound #(parameter Nk = 4, parameter Nr = 10) (roundCount, keyIn, keyOut);
     input [3:0] roundCount;
     input [32 * Nk - 1:0] keyIn;
-
     output [32 * Nk - 1:0] keyOut;
 
-    genvar i;
+    // =======================================================
+    // OPTIMIZATION 1: Simplified Word Extraction
+    // =======================================================
+    // Direct word assignment without generate block
+    wire [31:0] word0 = keyIn[127:96];
+    wire [31:0] word1 = keyIn[95:64]; 
+    wire [31:0] word2 = keyIn[63:32];
+    wire [31:0] word3 = keyIn[31:0];
 
-    // Split the key into Nk words
-    wire [31:0] words[Nk - 1:0];
+    // =======================================================
+    // OPTIMIZATION 2: Efficient RotWord + SubWord
+    // =======================================================
+    wire [31:0] rot_word = {word3[23:0], word3[31:24]};
+    
+    // Single S-box instantiation with direct mapping
+    wire [31:0] sub_word;
+    SubTable sbox0(rot_word[31:24], sub_word[31:24]);
+    SubTable sbox1(rot_word[23:16], sub_word[23:16]);
+    SubTable sbox2(rot_word[15:8],  sub_word[15:8]);
+    SubTable sbox3(rot_word[7:0],   sub_word[7:0]);
 
-    generate
-        for (i = 0; i < Nk; i = i + 1) begin: KeySplitLoop
-            assign words[i] = keyIn[(32 * Nk - 1) - i * 32 -: 32];
-        end
-    endgenerate
+    // =======================================================
+    // OPTIMIZATION 3: Optimized Round Constant
+    // =======================================================
+    // Use lookup table instead of function (more hardware friendly)
+    wire [7:0] rcon;
+    assign rcon = (roundCount == 4'd1) ? 8'h01 :
+                  (roundCount == 4'd2) ? 8'h02 :
+                  (roundCount == 4'd3) ? 8'h04 :
+                  (roundCount == 4'd4) ? 8'h08 :
+                  (roundCount == 4'd5) ? 8'h10 :
+                  (roundCount == 4'd6) ? 8'h20 :
+                  (roundCount == 4'd7) ? 8'h40 :
+                  (roundCount == 4'd8) ? 8'h80 :
+                  (roundCount == 4'd9) ? 8'h1b :
+                  (roundCount == 4'd10) ? 8'h36 : 8'h00;
+    
+    wire [31:0] round_constant = {rcon, 24'h0};
 
-    // Rotate the words (rotWord)
-    wire [31:0] w3Rot = {words[Nk - 1][23:0], words[Nk - 1][31:24]};
+    // =======================================================
+    // OPTIMIZATION 4: Simplified Key Expansion Logic
+    // =======================================================
+    // First word calculation
+    wire [31:0] new_word0 = word0 ^ sub_word ^ round_constant;
+    
+    // Remaining words (simplified for AES-128)
+    wire [31:0] new_word1 = word1 ^ new_word0;
+    wire [31:0] new_word2 = word2 ^ new_word1; 
+    wire [31:0] new_word3 = word3 ^ new_word2;
 
-    // Perform the substitution of the words (subWord)
-    wire [31:0] w3Sub;
+    // Output assignment
+    assign keyOut = {new_word0, new_word1, new_word2, new_word3};
 
-    generate 
-        for (i = 0; i < 4; i = i + 1) begin: SubWordLoop
-            SubTable subTable(w3Rot[8 * i +: 8], w3Sub[8 * i +: 8]);
-        end
-    endgenerate
-
-    // Perform the XOR operation with the round constant (roundConstant)
-    wire [7:0] roundConstantStart = roundCount == 1 ? 8'h01
-                                        : roundCount == 2 ? 8'h02
-                                        : roundCount == 3 ? 8'h04
-                                        : roundCount == 4 ? 8'h08
-                                        : roundCount == 5 ? 8'h10
-                                        : roundCount == 6 ? 8'h20
-                                        : roundCount == 7 ? 8'h40
-                                        : roundCount == 8 ? 8'h80
-                                        : roundCount == 9 ? 8'h1b
-                                        : roundCount == 10 ? 8'h36
-                                        : roundCount == 11 ? 8'h6c
-                                        : roundCount == 12 ? 8'hd8
-                                        : roundCount == 13 ? 8'hab
-                                        : roundCount == 14 ? 8'h4d
-                                        : roundCount == 15 ? 8'h9a
-                                        : roundCount == 16 ? 8'h2f
-                                        : 8'h00;
-    wire [31:0] roundConstant = {roundConstantStart, 24'h00};
-
-    assign keyOut[32 * Nk - 1 -: 32] = words[0] ^ w3Sub ^ roundConstant; // XOR the first word with the round constant
-
-    // Perform SubWord transformation for i % Nk work (256 bits key only)
-    wire [31:0] wSub;
-    generate 
-        for (i = 0; i < 4; i = i + 1) begin: SubWordLoopForWSub
-            SubTable subTable(keyOut[(32 * Nk - 1) - 3 * 32 - i * 8 -: 8], wSub[(3 - i) * 8 +: 8]);
-        end
-    endgenerate
-
-    generate
-        for (i = 1; i < Nk; i = i + 1) begin: KeyExpansionLoop
-            assign keyOut[(32 * Nk - 1) - i * 32 -: 32] = words[i] ^ (Nk == 8 && i == 4 ? wSub : keyOut[(32 * Nk - 1) - (i - 1) * 32 -: 32]); // XOR word i with word i - 1
-        end
-    endgenerate
 endmodule
 
 
-module KeyExpansionPipelined #(parameter Nk = 4, parameter Nr = 10)(
-    input clk,
-    input reset,
-    input [Nk*32 - 1:0] keyIn,     // initial key
-    output reg [(Nr+1)*128 - 1:0] allKeys, // concatenated all round keys
-    output reg done
+module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (
+    input clk, reset,
+    input [127:0] keyIn,
+    output reg [(Nr+1)*128-1:0] keysOut
 );
+    localparam TOTAL_KEYS = Nr + 1;
 
-    // Internal pipeline registers
-    reg [Nk*32 - 1:0] roundKey [0:Nr]; // 11 total keys for AES-128
-    integer i;
+    reg [127:0] expanded_keys [0:TOTAL_KEYS-1];
+    wire [127:0] next_key [0:TOTAL_KEYS-2];
 
-    // Round constants and pipeline control
-    reg [3:0] roundCount;
-    wire [Nk*32 - 1:0] nextKey;
+    genvar i;
+    generate
+        for (i = 0; i < TOTAL_KEYS-1; i = i + 1) begin: RoundGen
+            KeyExpansionRound #(Nk, Nr) round(
+                .roundCount(i[3:0] + 4'd1),
+                .keyIn(expanded_keys[i]),
+                .keyOut(next_key[i])
+            );
+        end
+    endgenerate
 
-    // --- Instantiate single round combinational logic ---
-    KeyExpansionRound #(Nk, Nr) keyRound (
-        .roundCount(roundCount),
-        .keyIn(roundKey[roundCount-1]),
-        .keyOut(nextKey)
-    );
-
-    // --- Sequential logic (pipeline) ---
+    integer j;
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            roundCount <= 0;
-            done <= 0;
-            for (i = 0; i <= Nr; i = i + 1)
-                roundKey[i] <= 0;
-        end
-        else begin
-            if (roundCount == 0) begin
-                roundKey[0] <= keyIn; // load initial key
-                roundCount <= 1;
-            end 
-            else if (roundCount <= Nr) begin
-                roundKey[roundCount] <= nextKey; // store next round key
-                roundCount <= roundCount + 1;
-            end
-            else begin
-                done <= 1;
-            end
+            expanded_keys[0] <= keyIn;
+            for (j = 1; j < TOTAL_KEYS; j = j + 1)
+                expanded_keys[j] <= 0;
+        end else begin
+            expanded_keys[0] <= keyIn;
+            for (j = 0; j < TOTAL_KEYS-1; j = j + 1)
+                expanded_keys[j+1] <= next_key[j];
         end
     end
 
-    // --- Output all keys concatenated when done ---
+    // Flatten array to single output bus
     always @(*) begin
-        allKeys = 0;
-        for (i = 0; i <= Nr; i = i + 1)
-            allKeys[((Nr - i + 1)*128) - 1 -: 128] = roundKey[i];
+        for (j = 0; j < TOTAL_KEYS; j = j + 1)
+            keysOut[((TOTAL_KEYS - j) * 128) - 1 -: 128] = expanded_keys[j];
     end
-
 endmodule
 
-
-module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (keyIn, keysOut);    
-    localparam rounds = (Nr == 10 ? 9 : (Nr == 12 ? 7 : 6));
-
-    input [(Nk * 32) - 1:0] keyIn;
-    output  [((Nr + 1) * 128) - 1:0] keysOut;
-
-    assign keysOut[((Nr + 1) * 128) - 1 -: (Nk * 32)] = keyIn;
-
-    // Perform the key expansion rounds (KeyExpansionRound)
-    genvar i;
-    generate
-        for (i = 0; i < rounds; i = i + 1) begin: KeyExpansionRoundLoop
-            KeyExpansionRound #(Nk, Nr) keyExpansionRound(i[3:0] + 4'b0001, keysOut[((Nr + 1) * 128) - 1 - i * (Nk * 32) -: (Nk * 32)], keysOut[((Nr + 1) * 128) - 1 - (i + 1) * (Nk * 32) -: (Nk * 32)]);
-        end
-    endgenerate
-
-    // Perform the last key expansion round (LastKeyExpansionRound)
-    wire [Nk * 32 - 1:0] lastkey;
-    KeyExpansionRound #(Nk, Nr) lastKeyExpansionRound(rounds[3:0] + 4'b0001, keysOut[128 +: (Nk * 32)], lastkey);
-
-    assign keysOut[127:0] = lastkey[Nk * 32 - 1 -: 128];
-endmodule
