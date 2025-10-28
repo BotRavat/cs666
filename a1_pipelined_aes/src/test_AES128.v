@@ -13,7 +13,7 @@
 
 module test_AES128();
 
-    parameter CLK_PERIOD = 20;     // 50 MHz
+    parameter CLK_PERIOD = 25;     // 50 MHz
     parameter NUM_BLOCKS = 15;     // number of parallel input blocks
     parameter MAX_LATENCY = 20;    // expected latency cycles
 
@@ -141,5 +141,4 @@ module test_AES128();
         $display("Simulation End @ %0t ns", $time);
         $finish;
     end
-
 endmodule
