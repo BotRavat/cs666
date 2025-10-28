@@ -64,6 +64,63 @@ module KeyExpansionRound #(parameter Nk = 4, parameter Nr = 10) (roundCount, key
     endgenerate
 endmodule
 
+
+module KeyExpansionPipelined #(parameter Nk = 4, parameter Nr = 10)(
+    input clk,
+    input reset,
+    input [Nk*32 - 1:0] keyIn,     // initial key
+    output reg [(Nr+1)*128 - 1:0] allKeys, // concatenated all round keys
+    output reg done
+);
+
+    // Internal pipeline registers
+    reg [Nk*32 - 1:0] roundKey [0:Nr]; // 11 total keys for AES-128
+    integer i;
+
+    // Round constants and pipeline control
+    reg [3:0] roundCount;
+    wire [Nk*32 - 1:0] nextKey;
+
+    // --- Instantiate single round combinational logic ---
+    KeyExpansionRound #(Nk, Nr) keyRound (
+        .roundCount(roundCount),
+        .keyIn(roundKey[roundCount-1]),
+        .keyOut(nextKey)
+    );
+
+    // --- Sequential logic (pipeline) ---
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            roundCount <= 0;
+            done <= 0;
+            for (i = 0; i <= Nr; i = i + 1)
+                roundKey[i] <= 0;
+        end
+        else begin
+            if (roundCount == 0) begin
+                roundKey[0] <= keyIn; // load initial key
+                roundCount <= 1;
+            end 
+            else if (roundCount <= Nr) begin
+                roundKey[roundCount] <= nextKey; // store next round key
+                roundCount <= roundCount + 1;
+            end
+            else begin
+                done <= 1;
+            end
+        end
+    end
+
+    // --- Output all keys concatenated when done ---
+    always @(*) begin
+        allKeys = 0;
+        for (i = 0; i <= Nr; i = i + 1)
+            allKeys[((Nr - i + 1)*128) - 1 -: 128] = roundKey[i];
+    end
+
+endmodule
+
+
 module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (keyIn, keysOut);    
     localparam rounds = (Nr == 10 ? 9 : (Nr == 12 ? 7 : 6));
 
