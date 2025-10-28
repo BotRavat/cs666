@@ -1,193 +1,177 @@
-module AESEncrypt_Optimized (
-    input clk,
-    input reset,
-    input [127:0] data,
-    input [127:0] key,
-    output reg [127:0] out,
-    output reg done
-);
-    parameter Nk = 4;
+module AESEncrypt (data, allKeys, state, clk, reset, done);
+    
+    parameter Nk = 4; 
     parameter Nr = 10;
+    
+    input [127:0] data;
+    input [((Nr + 1) * 128) - 1:0] allKeys;
+    input clk;
+    input reset;
+    output reg done;
+    output reg [127:0] state;
 
     // =======================================================
-    // Key Expansion Pipeline
+    // NEW: Enhanced Pipeline Registers for 2-Stage Inner Pipeline
     // =======================================================
-    wire [((Nr+1)*128)-1:0] allKeys;
-    wire key_ready;
+    
+    // Outer pipeline registers (after complete rounds)
+    reg [127:0] round_stage [0:Nr-1]; 
+    
+    // NEW: Inner pipeline registers (after SubBytes+ShiftRows for rounds 1-9)
+    reg [127:0] sub_shift_stage [0:Nr-2]; // 9 registers
 
-    KeyExpansion_Pipelined #(.Nk(Nk), .Nr(Nr)) ke (
-        .clk(clk),
-        .reset(reset),
-        .keyIn(key),
-        .allKeys(allKeys),
-        .key_ready(key_ready)
+    // Wires for each of the 10 rounds
+    wire [127:0] subByteWire [1:Nr];
+    wire [127:0] shiftRowsWire [1:Nr];
+    wire [127:0] mixColumnsWire [1:Nr-1];
+    wire [127:0] stateOut [0:Nr];
+
+    // =======================================================
+    // 0. Initial Round (AddRoundKey only - Stage 0)
+    // =======================================================
+    AddRoundKey addkey_0 (
+        data,
+        allKeys[((Nr + 1) * 128) - 128 +: 128],
+        stateOut[0]
     );
 
-    // =======================================================
-    // AES Round Pipeline Registers
-    // =======================================================
-    reg [127:0] stage1 [0:Nr-1]; // after SubBytes+ShiftRows
-    reg [127:0] stage2 [0:Nr-1]; // after MixColumns+AddRoundKey
-    reg [4:0] round_counter;
-
-    integer i;
-
-    // =======================================================
-    // Control Logic
-    // =======================================================
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            for (i=0;i<Nr;i=i+1) begin
-                stage1[i] <= 128'h0;
-                stage2[i] <= 128'h0;
-            end
-            out <= 128'h0;
-            round_counter <= 0;
-            done <= 0;
-        end else if (key_ready) begin
-            // === Round 0: AddRoundKey on input data ===
-            stage2[0] <= data ^ allKeys[Nr*128 +: 128];
-
-            // === Subsequent rounds ===
-            for (i=1; i<Nr; i=i+1) begin
-                // Stage1: SubBytes + ShiftRows
-                stage1[i] <= SubBytesShiftRows(stage2[i-1]);
-
-                // Stage2: MixColumns + AddRoundKey
-                stage2[i] <= MixColumns(stage1[i]) ^ allKeys[(Nr-i)*128 +: 128];
-            end
-
-            // === Final Round (Nr): SubBytes+ShiftRows + AddRoundKey, no MixColumns ===
-            stage1[Nr] <= SubBytesShiftRows(stage2[Nr-1]);
-            out <= stage1[Nr] ^ allKeys[0 +: 128];
-
-            // Update done
-            done <= 1;
-        end
-    end
-
-    // =======================================================
-    // Combinational functions for inner stages
-    // =======================================================
-    function [127:0] SubBytesShiftRows;
-        input [127:0] state_in;
-        integer b;
-        reg [7:0] sbox_out[0:15];
-        begin
-            // Apply S-box
-            for (b=0;b<16;b=b+1)
-                sbox_out[b] = SubTable(state_in[127-8*b -:8]);
-
-            // ShiftRows transformation
-            SubBytesShiftRows = {
-                sbox_out[0],  sbox_out[5],  sbox_out[10], sbox_out[15],
-                sbox_out[4],  sbox_out[9],  sbox_out[14], sbox_out[3],
-                sbox_out[8],  sbox_out[13], sbox_out[2],  sbox_out[7],
-                sbox_out[12], sbox_out[1],  sbox_out[6],  sbox_out[11]
-            };
-        end
-    endfunction
-
-    function [127:0] MixColumns;
-        input [127:0] state_in;
-        begin
-            // Call your MixColumns combinational module here
-            // Placeholder: identity function
-            MixColumns = state_in; 
-        end
-    endfunction
-
-    function [7:0] SubTable;
-        input [7:0] byte_in;
-        begin
-            // Replace with actual AES S-box table
-            SubTable = byte_in ^ 8'h63; // placeholder
-        end
-    endfunction
-
-endmodule
-
-// =======================================================
-// Pipelined Key Expansion
-// Generates one round key per cycle
-// =======================================================
-module KeyExpansion_Pipelined #(parameter Nk=4, Nr=10)(
-    input clk,
-    input reset,
-    input [Nk*32-1:0] keyIn,
-    output reg [((Nr+1)*128)-1:0] allKeys,
-    output reg key_ready
-);
-    reg [3:0] roundCount;
-    reg [Nk*32-1:0] currentKey;
-
-    integer i;
-
-    always @(posedge clk or posedge reset) begin
-        if (reset) begin
-            roundCount <= 0;
-            currentKey <= keyIn;
-            allKeys <= {keyIn, {(Nr*128){1'b0}}};
-            key_ready <= 0;
+            round_stage[0] <= 128'h0;
         end else begin
-            if (roundCount < Nr) begin
-                roundCount <= roundCount + 1;
-                currentKey <= KeyExpansionRoundFunc(currentKey, roundCount+1);
-                allKeys[((Nr+1)*128-1) - (roundCount*128) -:128] <= currentKey;
-            end else begin
-                key_ready <= 1;
-            end
+            round_stage[0] <= stateOut[0];
         end
     end
 
-    // Functional round key generation
-    function [Nk*32-1:0] KeyExpansionRoundFunc;
-        input [Nk*32-1:0] key_in;
-        input [3:0] rcnt;
-        integer j,k;
-        reg [31:0] words [0:Nk-1];
-        reg [31:0] w3Rot,w3Sub,wSub,roundConst32;
-        begin
-            for (j=0;j<Nk;j=j+1) words[j] = key_in[(Nk*32-1)-j*32 -:32];
-            w3Rot = {words[Nk-1][23:0], words[Nk-1][31:24]};
-            for (j=0;j<4;j=j+1) w3Sub[8*j +:8] = SubTable(w3Rot[8*j +:8]);
-            roundConst32 = {RoundConst(rcnt),24'h0};
-            KeyExpansionRoundFunc[(Nk*32-1) -:32] = words[0] ^ w3Sub ^ roundConst32;
-            for (j=1;j<Nk;j=j+1) begin
-                if (Nk==8 && j==4) begin
-                    for (k=0;k<4;k=k+1) wSub[8*(3-k)+:8] = SubTable(KeyExpansionRoundFunc[(Nk*32-1)-3*32-8*k -:8]);
-                    KeyExpansionRoundFunc[(Nk*32-1)-j*32 -:32] = words[j] ^ wSub;
+    // =======================================================
+    // 1. Modified Pipeline Stages (Round 1 to Round 9) with 2-Stage Inner Pipeline
+    // =======================================================
+    generate
+        genvar i;
+        for (i = 1; i <= Nr - 1; i = i + 1) begin : round_i
+            
+            // --- STAGE 1: SubBytes + ShiftRows ---
+            // Input comes from the previous outer register stage: round_stage[i-1]
+            
+            SubBytes sub (
+                round_stage[i-1],
+                subByteWire[i]
+            );
+            
+            ShiftRows shft (
+                subByteWire[i],
+                shiftRowsWire[i]
+            );
+            
+            // NEW: First inner pipeline register (after SubBytes+ShiftRows)
+            always @(posedge clk or posedge reset) begin
+                if (reset) begin
+                    sub_shift_stage[i-1] <= 128'h0;
                 end else begin
-                    KeyExpansionRoundFunc[(Nk*32-1)-j*32 -:32] = words[j] ^ KeyExpansionRoundFunc[(Nk*32-1)-(j-1)*32 -:32];
+                    sub_shift_stage[i-1] <= shiftRowsWire[i];
+                end
+            end
+            
+            // --- STAGE 2: MixColumns + AddRoundKey ---
+            // Input comes from the inner pipeline register: sub_shift_stage[i-1]
+            
+            MixColumns mix (
+                sub_shift_stage[i-1],
+                mixColumnsWire[i]
+            );
+            
+            AddRoundKey addkey (
+                mixColumnsWire[i],
+                allKeys[((Nr-i) * 128) +: 128],
+                stateOut[i]
+            );
+
+            // Outer pipeline register (after complete round)
+            always @(posedge clk or posedge reset) begin
+                if (reset) begin
+                    round_stage[i] <= 128'h0;
+                end else begin
+                    round_stage[i] <= stateOut[i];
                 end
             end
         end
-    endfunction
+    endgenerate
 
-    function [7:0] RoundConst;
-        input [3:0] rcnt;
-        begin
-            case(rcnt)
-                1: RoundConst = 8'h01;
-                2: RoundConst = 8'h02;
-                3: RoundConst = 8'h04;
-                4: RoundConst = 8'h08;
-                5: RoundConst = 8'h10;
-                6: RoundConst = 8'h20;
-                7: RoundConst = 8'h40;
-                8: RoundConst = 8'h80;
-                9: RoundConst = 8'h1b;
-                10: RoundConst = 8'h36;
-                default: RoundConst = 8'h00;
-            endcase
-        end
-    endfunction
+    // =======================================================
+    // 2. Final Round (Round 10 - Skips MixColumns)
+    // =======================================================
+    // Note: Final round doesn't need inner pipelining since it skips MixColumns
+    
+    SubBytes sub_final (
+        round_stage[Nr-1],
+        subByteWire[Nr]
+    );
+    
+    ShiftRows shft_final (
+        subByteWire[Nr],
+        shiftRowsWire[Nr]
+    );
 
-    function [7:0] SubTable;
-        input [7:0] b;
-        begin
-            SubTable = b ^ 8'h63; // placeholder
+    AddRoundKey addkey_final (
+        shiftRowsWire[Nr],
+        allKeys[0 +: 128],
+        stateOut[Nr]
+    );
+
+    // =======================================================
+    // 3. Enhanced Control Logic for Extended Pipeline
+    // =======================================================
+    // NEW: Extended counter to handle 20 pipeline stages (was 11)
+    reg [4:0] round_counter;  // Expanded from 4 to 5 bits
+    reg done_internal;
+
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            round_counter <= 0;
+            done_internal <= 0;
+            done <= 0;
+        end else begin
+            // NEW: Count up to 20 cycles total pipeline depth
+            if (round_counter < (Nr * 2)) begin  // 10 rounds * 2 stages = 20
+                round_counter <= round_counter + 1;
+            end
+            
+            // NEW: Set done when counter reaches 19 (end of cycle 19)
+            if (round_counter == (Nr * 2 - 1)) begin  // 20 - 1 = 19
+                done_internal <= 1;
+            end
+            
+            done <= done_internal;
         end
-    endfunction
+    end
+
+    // =======================================================
+    // 4. Final Output Register Assignment
+    // =======================================================
+    always @(posedge clk or posedge reset) begin
+        if (reset) begin
+            state <= 128'h0;
+        end else begin
+            state <= stateOut[Nr];
+        end
+    end
+
+endmodule
+
+// DUT module remains unchanged
+module AESEncrypt128_DUT(data, key, clk, reset, out, done);
+    parameter Nk = 4;
+    parameter Nr = 10;
+
+    input [127:0] data;
+    input [Nk * 32 - 1:0] key;
+    input clk, reset;
+    output [127:0] out;
+    output done;
+    
+    wire [((Nr + 1) * 128) - 1:0] allKeys;
+
+    KeyExpansion #(.Nk(Nk), .Nr(Nr)) ke(key, allKeys);
+    AESEncrypt #(.Nk(Nk), .Nr(Nr)) aes_enc(data, allKeys, out, clk, reset, done);
 
 endmodule
