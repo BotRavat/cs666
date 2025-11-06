@@ -31,7 +31,7 @@ module AESEncrypt #(parameter Nk = 4, parameter Nr = 10) (
     always @(posedge clk or posedge reset) begin
         if(reset)
             round_stage[0] <= 128'h0;
-        else if(key_ready)
+        else 
             round_stage[0] <= stateOut[0];
     end
 
@@ -42,20 +42,20 @@ module AESEncrypt #(parameter Nk = 4, parameter Nr = 10) (
             SubBytes sub (round_stage[i-1], subByteWire[i]);
             always @(posedge clk or posedge reset) begin
                 if(reset) subbyte_stage[i-1] <= 128'h0;
-                else if(key_ready) subbyte_stage[i-1] <= subByteWire[i];
+                else  subbyte_stage[i-1] <= subByteWire[i];
             end
 
             ShiftRows shft (subbyte_stage[i-1], shiftRowsWire[i]);
             MixColumns mix (shiftRowsWire[i], mixColumnsWire[i]);
             always @(posedge clk or posedge reset) begin
                 if(reset) shift_mix_stage[i-1] <= 128'h0;
-                else if(key_ready) shift_mix_stage[i-1] <= mixColumnsWire[i];
+                else  shift_mix_stage[i-1] <= mixColumnsWire[i];
             end
 
             AddRoundKey addkey (shift_mix_stage[i-1], allKeys[((Nr-i+1)*128)-1 -: 128], stateOut[i]);
             always @(posedge clk or posedge reset) begin
                 if(reset) round_stage[i] <= 128'h0;
-                else if(key_ready) round_stage[i] <= stateOut[i];
+                else round_stage[i] <= stateOut[i];
             end
         end
     endgenerate
@@ -81,7 +81,7 @@ module AESEncrypt #(parameter Nk = 4, parameter Nr = 10) (
     // Final Output
     always @(posedge clk or posedge reset) begin
         if(reset) state <= 128'h0;
-        else if(key_ready) state <= stateOut[Nr];
+        else  state <= stateOut[Nr];
     end
 
 endmodule
