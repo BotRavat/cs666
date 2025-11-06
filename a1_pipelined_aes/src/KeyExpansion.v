@@ -1,101 +1,122 @@
-module KeyExpansionRound #(parameter Nk = 4, parameter Nr = 10) (roundCount, keyIn, keyOut);
-    input [3:0] roundCount;
-    input [32 * Nk - 1:0] keyIn;
-    output [32 * Nk - 1:0] keyOut;
-
-    // =======================================================
-    // OPTIMIZATION 1: Simplified Word Extraction
-    // =======================================================
-    // Direct word assignment without generate block
-    wire [31:0] word0 = keyIn[127:96];
-    wire [31:0] word1 = keyIn[95:64]; 
-    wire [31:0] word2 = keyIn[63:32];
-    wire [31:0] word3 = keyIn[31:0];
-
-    // =======================================================
-    // OPTIMIZATION 2: Efficient RotWord + SubWord
-    // =======================================================
-    wire [31:0] rot_word = {word3[23:0], word3[31:24]};
-    
-    // Single S-box instantiation with direct mapping
-    wire [31:0] sub_word;
-    SubTable sbox0(rot_word[31:24], sub_word[31:24]);
-    SubTable sbox1(rot_word[23:16], sub_word[23:16]);
-    SubTable sbox2(rot_word[15:8],  sub_word[15:8]);
-    SubTable sbox3(rot_word[7:0],   sub_word[7:0]);
-
-    // =======================================================
-    // OPTIMIZATION 3: Optimized Round Constant
-    // =======================================================
-    // Use lookup table instead of function (more hardware friendly)
-    wire [7:0] rcon;
-    assign rcon = (roundCount == 4'd1) ? 8'h01 :
-                  (roundCount == 4'd2) ? 8'h02 :
-                  (roundCount == 4'd3) ? 8'h04 :
-                  (roundCount == 4'd4) ? 8'h08 :
-                  (roundCount == 4'd5) ? 8'h10 :
-                  (roundCount == 4'd6) ? 8'h20 :
-                  (roundCount == 4'd7) ? 8'h40 :
-                  (roundCount == 4'd8) ? 8'h80 :
-                  (roundCount == 4'd9) ? 8'h1b :
-                  (roundCount == 4'd10) ? 8'h36 : 8'h00;
-    
-    wire [31:0] round_constant = {rcon, 24'h0};
-
-    // =======================================================
-    // OPTIMIZATION 4: Simplified Key Expansion Logic
-    // =======================================================
-    // First word calculation
-    wire [31:0] new_word0 = word0 ^ sub_word ^ round_constant;
-    
-    // Remaining words (simplified for AES-128)
-    wire [31:0] new_word1 = word1 ^ new_word0;
-    wire [31:0] new_word2 = word2 ^ new_word1; 
-    wire [31:0] new_word3 = word3 ^ new_word2;
-
-    // Output assignment
-    assign keyOut = {new_word0, new_word1, new_word2, new_word3};
-
-endmodule
-
-
 module KeyExpansion #(parameter Nk = 4, parameter Nr = 10) (
-    input clk, reset,
+    input clk,
+    input reset,
     input [127:0] keyIn,
-    output reg [(Nr+1)*128-1:0] keysOut
+    output reg [(Nr+1)*128-1:0] keysOut,
+    output reg key_ready
 );
     localparam TOTAL_KEYS = Nr + 1;
 
-    reg [127:0] expanded_keys [0:TOTAL_KEYS-1];
-    wire [127:0] next_key [0:TOTAL_KEYS-2];
+    // storage
+    reg [127:0] round_keys [0:TOTAL_KEYS-1];
+    reg [3:0] round_idx;
+    reg [1:0] phase;
 
-    genvar i;
-    generate
-        for (i = 0; i < TOTAL_KEYS-1; i = i + 1) begin: RoundGen
-            KeyExpansionRound #(Nk, Nr) round(
-                .roundCount(i[3:0] + 4'd1),
-                .keyIn(expanded_keys[i]),
-                .keyOut(next_key[i])
-            );
-        end
-    endgenerate
+    // Pipeline registers - carefully track round index through stages
+    reg [31:0] w0_s0, w1_s0, w2_s0, w3_s0;
+    reg [31:0] rot_word_s0;
+    reg [3:0] round_idx_s0;
+    
+    reg [31:0] w0_s1, w1_s1, w2_s1, w3_s1;
+    reg [31:0] rot_word_s1;
+    reg [3:0] round_idx_s1;
+    
+    reg [31:0] w0_s2, w1_s2, w2_s2, w3_s2;
+    reg [31:0] sb_s2;
+    reg [31:0] rcon_s2;
+    reg [3:0] round_idx_s2;
 
-    integer j;
+    // combinational wires
+    wire [31:0] w0_c = round_keys[round_idx][127:96];
+    wire [31:0] w1_c = round_keys[round_idx][95:64];
+    wire [31:0] w2_c = round_keys[round_idx][63:32];
+    wire [31:0] w3_c = round_keys[round_idx][31:0];
+    wire [31:0] rot_word_c = {w3_c[23:0], w3_c[31:24]};
+
+    // S-box
+    wire [7:0] sb0, sb1, sb2, sb3;
+    SubTable s0(rot_word_s1[31:24], sb0);
+    SubTable s1(rot_word_s1[23:16], sb1);
+    SubTable s2(rot_word_s1[15:8],  sb2);
+    SubTable s3(rot_word_s1[7:0],   sb3);
+    wire [31:0] sub_word_c = {sb0, sb1, sb2, sb3};
+
+    // rcon function
+    function [7:0] get_rcon(input [3:0] rc);
+        case(rc)
+            4'd1:  get_rcon = 8'h01; 4'd2:  get_rcon = 8'h02; 4'd3:  get_rcon = 8'h04;
+            4'd4:  get_rcon = 8'h08; 4'd5:  get_rcon = 8'h10; 4'd6:  get_rcon = 8'h20;
+            4'd7:  get_rcon = 8'h40; 4'd8:  get_rcon = 8'h80; 4'd9:  get_rcon = 8'h1b;
+            4'd10: get_rcon = 8'h36; default: get_rcon = 8'h00;
+        endcase
+    endfunction
+
+    // Final combinational logic - ONLY 2 XOR levels now
+    wire [127:0] next_key_c;
+    assign next_key_c[127:96] = w0_s2 ^ sb_s2 ^ rcon_s2;  // This is the only 3-input XOR
+    assign next_key_c[95:64]  = w1_s2 ^ next_key_c[127:96];
+    assign next_key_c[63:32]  = w2_s2 ^ next_key_c[95:64]; 
+    assign next_key_c[31:0]   = w3_s2 ^ next_key_c[63:32];
+
+    integer k;
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            expanded_keys[0] <= keyIn;
-            for (j = 1; j < TOTAL_KEYS; j = j + 1)
-                expanded_keys[j] <= 0;
+            round_keys[0] <= keyIn;
+            for (k = 1; k < TOTAL_KEYS; k = k + 1) round_keys[k] <= 128'h0;
+            round_idx <= 0; 
+            phase <= 0; 
+            key_ready <= 0;
+            
+            // Reset all pipeline registers
+            w0_s0 <= 0; w1_s0 <= 0; w2_s0 <= 0; w3_s0 <= 0; rot_word_s0 <= 0; round_idx_s0 <= 0;
+            w0_s1 <= 0; w1_s1 <= 0; w2_s1 <= 0; w3_s1 <= 0; rot_word_s1 <= 0; round_idx_s1 <= 0;
+            w0_s2 <= 0; w1_s2 <= 0; w2_s2 <= 0; w3_s2 <= 0; sb_s2 <= 0; rcon_s2 <= 0; round_idx_s2 <= 0;
         end else begin
-            expanded_keys[0] <= keyIn;
-            for (j = 0; j < TOTAL_KEYS-1; j = j + 1)
-                expanded_keys[j+1] <= next_key[j];
+            // Pipeline stage 3: Store result (always happens when pipeline is full)
+            if (phase == 2'b11) begin
+                round_keys[round_idx_s2 + 1] <= next_key_c;
+                if (round_idx_s2 == Nr - 1) begin
+                    key_ready <= 1;
+                end
+                round_idx <= round_idx + 1;  // Only increment when we store
+            end
+
+            // Pipeline progression
+            case (phase)
+                2'b00: begin // Stage 0: Capture input key words
+                    if (round_idx < Nr) begin
+                        w0_s0 <= w0_c; 
+                        w1_s0 <= w1_c; 
+                        w2_s0 <= w2_c; 
+                        w3_s0 <= w3_c;
+                        rot_word_s0 <= rot_word_c; 
+                        round_idx_s0 <= round_idx;
+                        phase <= 2'b01;
+                    end
+                end
+                2'b01: begin // Stage 1: Propagate to S-box input
+                    w0_s1 <= w0_s0; w1_s1 <= w1_s0; w2_s1 <= w2_s0; w3_s1 <= w3_s0;
+                    rot_word_s1 <= rot_word_s0; 
+                    round_idx_s1 <= round_idx_s0;
+                    phase <= 2'b10;
+                end
+                2'b10: begin // Stage 2: S-box + Rcon computation
+                    w0_s2 <= w0_s1; w1_s2 <= w1_s1; w2_s2 <= w2_s1; w3_s2 <= w3_s1;
+                    sb_s2 <= sub_word_c;
+                    rcon_s2 <= {get_rcon(round_idx_s1 + 1), 24'h0};
+                    round_idx_s2 <= round_idx_s1;
+                    phase <= 2'b11;
+                end
+                2'b11: begin // Stage 3: XOR computation happens combinationally, result stored above
+                    phase <= (round_idx < Nr) ? 2'b00 : 2'b11; // Continue or stay done
+                end
+            endcase
         end
     end
 
-    // Flatten array to single output bus
+    // flatten keys
     always @(*) begin
-        for (j = 0; j < TOTAL_KEYS; j = j + 1)
-            keysOut[((TOTAL_KEYS - j) * 128) - 1 -: 128] = expanded_keys[j];
+        for (k = 0; k < TOTAL_KEYS; k = k + 1)
+            keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] = round_keys[k];
     end
 endmodule
