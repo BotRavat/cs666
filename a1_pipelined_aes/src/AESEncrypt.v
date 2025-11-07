@@ -1,160 +1,137 @@
-module AESEncrypt (data, allKeys, state, clk, reset, done);
-    
-    parameter Nk = 4; 
-    parameter Nr = 10;
-    
-    input [127:0] data;
-    input [((Nr + 1) * 128) - 1:0] allKeys;
-    input clk;
-    input reset;
-    output reg done;
-    output reg [127:0] state;
+// ============================================================================
+// AES-128 Encryption Core - 1-stage pipeline (register between rounds only)
+// ============================================================================
+module AESEncrypt #(
+    parameter Nk = 4,
+    parameter Nr = 10
+)(
+    input  wire [127:0] data,
+    input  wire [((Nr + 1) * 128) - 1:0] allKeys,
+    input  wire clk,
+    input  wire reset,
+    input  wire key_ready,
+    output reg  done,
+    output reg  [127:0] state
+);
 
-   
-     // ----------------------------
-    // Pipeline Registers
-    // ----------------------------
-    reg [127:0] round_stage [0:Nr-1];       // Outer stage after full round
-    reg [127:0] subbyte_stage [0:Nr-2];     // Stage 1: After SubBytes
-    reg [127:0] shift_mix_stage [0:Nr-2];   // Stage 2: After ShiftRows+MixColumns
+    // ------------------------------------------------------------------------
+    // Pipeline registers (1 stage per AES round)
+    // ------------------------------------------------------------------------
+    reg [127:0] round_stage [0:Nr];
 
-    // Wires
-    wire [127:0] subByteWire [1:Nr];
-    wire [127:0] shiftRowsWire [1:Nr];
-    wire [127:0] mixColumnsWire [1:Nr-1];
-    wire [127:0] stateOut [0:Nr];
+    // ------------------------------------------------------------------------
+    // Round function wires
+    // ------------------------------------------------------------------------
+    wire [127:0] sb_out, sr_out, mc_out, add_out;
+    wire [127:0] next_state [0:Nr];
 
-    // ----------------------------
-    // 0. Initial Round: AddRoundKey
-    // ----------------------------
+    // ------------------------------------------------------------------------
+    // Initial AddRoundKey
+    // ------------------------------------------------------------------------
     AddRoundKey addkey_0 (
         data,
-        allKeys[((Nr+1)*128)-1 -: 128], // highest round key first
-        stateOut[0]
+        allKeys[((Nr + 1) * 128) - 1 -: 128],
+        next_state[0]
     );
 
     always @(posedge clk or posedge reset) begin
-        if(reset)
+        if (reset)
             round_stage[0] <= 128'h0;
-        else
-            round_stage[0] <= stateOut[0];
+        else if (key_ready)
+            round_stage[0] <= next_state[0];
     end
 
-    // ----------------------------
-    // 1. Rounds 1 to Nr-1
-    // ----------------------------
+    // ------------------------------------------------------------------------
+    // AES Rounds (1 register between each round)
+    // ------------------------------------------------------------------------
     genvar i;
     generate
-        for(i = 1; i <= Nr-1; i=i+1) begin: rounds
-            // Stage 1: SubBytes
-            SubBytes sub (
-                round_stage[i-1],
-                subByteWire[i]
-            );
+        for (i = 1; i < Nr; i = i + 1) begin : aes_rounds
+            wire [127:0] sb, sr, mc, ak;
+
+            SubBytes   sb_inst(round_stage[i-1], sb);
+            ShiftRows  sr_inst(sb, sr);
+            MixColumns mc_inst(sr, mc);
+            AddRoundKey ak_inst(mc, allKeys[((Nr - i + 1) * 128) - 1 -: 128], ak);
+
+            assign next_state[i] = ak;
 
             always @(posedge clk or posedge reset) begin
-                if(reset)
-                    subbyte_stage[i-1] <= 128'h0;
-                else
-                    subbyte_stage[i-1] <= subByteWire[i];
-            end
-
-            // Stage 2: ShiftRows + MixColumns
-            ShiftRows shft (
-                subbyte_stage[i-1],
-                shiftRowsWire[i]
-            );
-
-            MixColumns mix (
-                shiftRowsWire[i],
-                mixColumnsWire[i]
-            );
-
-            always @(posedge clk or posedge reset) begin
-                if(reset)
-                    shift_mix_stage[i-1] <= 128'h0;
-                else
-                    shift_mix_stage[i-1] <= mixColumnsWire[i];
-            end
-
-            // Stage 3: AddRoundKey
-            AddRoundKey addkey (
-                shift_mix_stage[i-1],
-                allKeys[((Nr-i+1)*128)-1 -: 128], // next highest round key
-                stateOut[i]
-            );
-
-            always @(posedge clk or posedge reset) begin
-                if(reset)
+                if (reset)
                     round_stage[i] <= 128'h0;
-                else
-                    round_stage[i] <= stateOut[i];
+                else if (key_ready)
+                    round_stage[i] <= next_state[i];
             end
         end
     endgenerate
 
-    // ----------------------------
-    // 2. Final Round: Nr (SubBytes -> ShiftRows -> AddRoundKey)
-    // ----------------------------
-    SubBytes sub_final (
-        round_stage[Nr-1],
-        subByteWire[Nr]
-    );
+    // ------------------------------------------------------------------------
+    // Final Round (no MixColumns)
+    // ------------------------------------------------------------------------
+    wire [127:0] sb_final, sr_final, ak_final;
+    SubBytes   sb_final_inst(round_stage[Nr-1], sb_final);
+    ShiftRows  sr_final_inst(sb_final, sr_final);
+    AddRoundKey ak_final_inst(sr_final, allKeys[0 +: 128], ak_final);
 
-    ShiftRows shft_final (
-        subByteWire[Nr],
-        shiftRowsWire[Nr]
-    );
+    assign next_state[Nr] = ak_final;
 
-    AddRoundKey addkey_final (
-        shiftRowsWire[Nr],
-        allKeys[0 +: 128], // lowest round key last
-        stateOut[Nr]
-    );
-
-    // ----------------------------
-    // 3. Control Logic
-    // ----------------------------
+    // ------------------------------------------------------------------------
+    // Control Logic
+    // ------------------------------------------------------------------------
     reg [5:0] cycle_count;
     always @(posedge clk or posedge reset) begin
-        if(reset) begin
+        if (reset) begin
             cycle_count <= 0;
             done <= 0;
-        end else begin
-            cycle_count <= cycle_count + 1;
-            if(cycle_count >= (Nr-1)*3 + 2) // pipeline full
+        end else if (key_ready) begin
+            if (cycle_count < Nr + 1)
+                cycle_count <= cycle_count + 1;
+            else
                 done <= 1;
         end
     end
 
-    // ----------------------------
-    // 4. Final Output
-    // ----------------------------
+    // ------------------------------------------------------------------------
+    // Output register
+    // ------------------------------------------------------------------------
     always @(posedge clk or posedge reset) begin
-        if(reset)
+        if (reset)
             state <= 128'h0;
-        else
-            state <= stateOut[Nr];
+        else if (key_ready)
+            state <= next_state[Nr];
     end
-
-
 
 endmodule
 
 
-module AESEncrypt128_DUT(data, key, clk, reset, out, done);
+module AESEncrypt128_DUT(
+    input [127:0] data,
+    input [127:0] key,
+    input clk, reset,
+    output [127:0] out,
+    output done,
+    output key_ready 
+);
     parameter Nk = 4;
     parameter Nr = 10;
 
-    input [127:0] data;
-    input [Nk * 32 - 1:0] key;
-    input clk, reset;
-    output [127:0] out;
-    output done;
-    
     wire [((Nr + 1) * 128) - 1:0] allKeys;
 
-    KeyExpansion #(.Nk(Nk), .Nr(Nr)) ke(clk, reset, key, allKeys);
-    AESEncrypt #(.Nk(Nk), .Nr(Nr)) aes_enc(data, allKeys, out, clk, reset, done);
+    KeyExpansion #(.Nk(Nk), .Nr(Nr)) ke(
+        .clk(clk),
+        .reset(reset),
+        .keyIn(key),
+        .keysOut(allKeys),
+        .key_ready(key_ready)     // <-- added
+    );
 
+    AESEncrypt #(.Nk(Nk), .Nr(Nr)) aes_enc(
+        .data(data),
+        .allKeys(allKeys),
+        .clk(clk),
+        .reset(reset),
+        .key_ready(key_ready),    // <-- added
+        .done(done),
+        .state(out)
+    );
 endmodule
