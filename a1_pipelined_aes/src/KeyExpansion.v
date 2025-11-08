@@ -1,8 +1,3 @@
-// AES-128 Key Expansion: 3-stage pipeline with safe dependency handling
-// - Stage 0: slice current source key (src_key_reg) into words + RotWord
-// - Stage 1: SubWord (S-box) on RotWord, prep Rcon index
-// - Stage 2: XOR chain to form next_key; commit to storage; forward to src_key_reg
-//
 
 module KeyExpansion #(
     parameter Nk = 4,               // AES-128
@@ -16,19 +11,16 @@ module KeyExpansion #(
 );
     localparam TOTAL_KEYS = Nr + 1;
 
-    // ------------------------------------------------------------------------
-    // Storage for round keys (for output/inspection). We read from a separate
-    // src_key_reg for timing-safe source feeding.
-    // ------------------------------------------------------------------------
+   
     reg [127:0] round_keys [0:TOTAL_KEYS-1];
 
-    // "Source" key index for the current round (0..Nr-1)
+    //  current round (0..Nr-1)
     reg  [3:0]  round_idx;
 
-    // Current source key used to start a round (forwarded next_key)
+ 
     reg [127:0] src_key_reg;
 
-    // We trigger the next launch one cycle after commit to avoid RAW hazards.
+   
     reg         pending_launch;
 
     // ------------------------------------------------------------------------
@@ -88,7 +80,7 @@ module KeyExpansion #(
     endfunction
 
     // ------------------------------------------------------------------------
-    // XOR chain (from Stage 2 regs)
+    // XOR chain (Stage 2 regs)
     // ------------------------------------------------------------------------
     wire [127:0] next_key_c;
     assign next_key_c[127:96] = w0_s2 ^ sb_s2 ^ rcon_s2;   // only 3-input XOR here
@@ -194,9 +186,7 @@ module KeyExpansion #(
                 round_idx_s1 <= round_idx_s0;
             end
 
-            // -------------------------
-            // Launch into Stage 0 when safe
-            // -------------------------
+            
             s0_valid <= launch_now;
             if (launch_now) begin
                 // Take words from the *current* src_key_reg
@@ -208,12 +198,19 @@ module KeyExpansion #(
                 round_idx_s0 <= round_idx;   // source index for this round
             end
 
-            // -------------------------
-            // keysOut flatten (registered for sim neatness; not critical)
-            // -------------------------
-            for (k = 0; k < TOTAL_KEYS; k = k + 1)
-                keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] <= round_keys[k];
+            // // -------------------------
+            // // keysOut flatten (registered for sim neatness; not critical)
+            // // -------------------------
+            // for (k = 0; k < TOTAL_KEYS; k = k + 1)
+            //     keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] <= round_keys[k];
         end
     end
+
+
+    always @* begin
+  for ( k = 0; k < TOTAL_KEYS; k = k + 1)
+    keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] = round_keys[k];
+end
+
 
 endmodule
