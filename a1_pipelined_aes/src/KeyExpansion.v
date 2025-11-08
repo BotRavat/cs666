@@ -1,4 +1,10 @@
-
+// ============================================================================
+// AES-128 Key Expansion: 3-stage pipeline (balanced XOR + registered flatten)
+// - Preserves naming/style
+// - Balanced XOR removes ripple depth in Stage-2
+// - round_keys[] constant-index write for easy timing
+// - keysOut is registered; same-cycle visibility of next_key_c
+// ============================================================================
 module KeyExpansion #(
     parameter Nk = 4,               // AES-128
     parameter Nr = 10               // AES-128
@@ -11,16 +17,13 @@ module KeyExpansion #(
 );
     localparam TOTAL_KEYS = Nr + 1;
 
-   
+    // Store produced round keys (0..Nr). Force FFs (no RAM) for predictable timing.
+    (* ram_style = "registers" *)
     reg [127:0] round_keys [0:TOTAL_KEYS-1];
 
-    //  current round (0..Nr-1)
+    // current round (0..Nr-1)
     reg  [3:0]  round_idx;
-
- 
     reg [127:0] src_key_reg;
-
-   
     reg         pending_launch;
 
     // ------------------------------------------------------------------------
@@ -49,7 +52,7 @@ module KeyExpansion #(
     reg [31:0]  rcon_s2;
 
     // ------------------------------------------------------------------------
-    // Slice the *source* key for Stage 0 (from src_key_reg, not round_keys[])
+    // Slice the *source* key for Stage 0 (from src_key_reg)
     // ------------------------------------------------------------------------
     wire [31:0] w0_src = src_key_reg[127:96];
     wire [31:0] w1_src = src_key_reg[95:64];
@@ -80,25 +83,29 @@ module KeyExpansion #(
     endfunction
 
     // ------------------------------------------------------------------------
-    // XOR chain (Stage 2 regs)
+    // XOR chain (Stage 2) - Balanced version to reduce depth
+    // next_w0 is independent; others are 1-xor away using pre-XORed prefixes
     // ------------------------------------------------------------------------
+    wire [31:0] next_w0 = w0_s2 ^ sb_s2 ^ rcon_s2;   // ~2 LUT levels
+    wire [31:0] c1      = w1_s2;
+    wire [31:0] c2      = w2_s2 ^ w1_s2;
+    wire [31:0] c3      = w3_s2 ^ w2_s2 ^ w1_s2;
+
     wire [127:0] next_key_c;
-    assign next_key_c[127:96] = w0_s2 ^ sb_s2 ^ rcon_s2;   // only 3-input XOR here
-    assign next_key_c[95:64]  = w1_s2 ^ next_key_c[127:96];
-    assign next_key_c[63:32]  = w2_s2 ^ next_key_c[95:64];
-    assign next_key_c[31:0]   = w3_s2 ^ next_key_c[63:32];
+    assign next_key_c[127:96] = next_w0;
+    assign next_key_c[95:64]  = c1 ^ next_w0;
+    assign next_key_c[63:32]  = c2 ^ next_w0;
+    assign next_key_c[31:0]   = c3 ^ next_w0;
 
     // ------------------------------------------------------------------------
-    // Launch control
-    // We only have one round in flight due to dependency. Launch when:
-    //   - there's a pending_launch, and
-    //   - pipeline is idle.
+    // Launch control (single round in flight due to data dependency)
     // ------------------------------------------------------------------------
     wire pipeline_idle = ~s0_valid & ~s1_valid & ~s2_valid;
     wire can_launch    = (round_idx < Nr);
     wire launch_now    = pending_launch & pipeline_idle & can_launch;
 
     integer k;
+    integer i;
 
     // ------------------------------------------------------------------------
     // Sequential logic
@@ -125,17 +132,19 @@ module KeyExpansion #(
             w0_s1 <= 32'd0; w1_s1 <= 32'd0; w2_s1 <= 32'd0; w3_s1 <= 32'd0; rot_word_s1 <= 32'd0;
             w0_s2 <= 32'd0; w1_s2 <= 32'd0; w2_s2 <= 32'd0; w3_s2 <= 32'd0; sb_s2 <= 32'd0; rcon_s2 <= 32'd0;
 
+            // Seed keysOut with round_keys[] layout (top slice = round_keys[0] = keyIn)
+            for (k = 0; k < TOTAL_KEYS; k = k + 1)
+                keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] <= round_keys[k];
+
             // Kick off the very first round when pipeline becomes idle (next cycle)
             pending_launch <= 1'b1;
 
-            // keysOut combinational below; keep a reset value for sim clarity
-            keysOut <= {((Nr+1)*128){1'b0}};
         end else begin
             // -------------------------
             // Stage 2 -> Commit result
             // -------------------------
             if (s2_valid) begin
-                // Write next round key to storage for visibility
+                // Write next round key to storage
                 round_keys[round_idx_s2 + 1] <= next_key_c;
 
                 // Forward the new key to become the next source key
@@ -148,7 +157,7 @@ module KeyExpansion #(
                 if (round_idx_s2 == Nr - 1)
                     key_ready <= 1'b1;
 
-                // If more rounds remain, request a launch (next cycle)
+                // Request next launch if more remain
                 if (round_idx_s2 + 1 < Nr)
                     pending_launch <= 1'b1;
                 else
@@ -186,7 +195,9 @@ module KeyExpansion #(
                 round_idx_s1 <= round_idx_s0;
             end
 
-            
+            // -------------------------
+            // Stage 0 launch
+            // -------------------------
             s0_valid <= launch_now;
             if (launch_now) begin
                 // Take words from the *current* src_key_reg
@@ -198,19 +209,18 @@ module KeyExpansion #(
                 round_idx_s0 <= round_idx;   // source index for this round
             end
 
-            // // -------------------------
-            // // keysOut flatten (registered for sim neatness; not critical)
-            // // -------------------------
-            // for (k = 0; k < TOTAL_KEYS; k = k + 1)
-            //     keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] <= round_keys[k];
+            // -------------------------
+            // Registered flatten to keysOut
+            //  - Shows the just-written key in the same cycle as s2_valid
+            //  - Keeps output registered for stable kernel boundary
+            // -------------------------
+            for (i = 0; i < TOTAL_KEYS; i = i + 1) begin
+                if (s2_valid && (i == (round_idx_s2 + 1)))
+                    keysOut[((TOTAL_KEYS - i) * 128) - 1 -: 128] <= next_key_c;
+                else
+                    keysOut[((TOTAL_KEYS - i) * 128) - 1 -: 128] <= round_keys[i];
+            end
         end
     end
-
-
-    always @* begin
-  for ( k = 0; k < TOTAL_KEYS; k = k + 1)
-    keysOut[((TOTAL_KEYS - k) * 128) - 1 -: 128] = round_keys[k];
-end
-
 
 endmodule
