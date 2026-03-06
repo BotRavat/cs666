@@ -1,19 +1,20 @@
 `timescale 1ps / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// AES-128 Pipelined Validation - Corrected Testbench
+// AES-128 Pipelined Validation - Testbench (Cycle-based timing)
+// - Uses clock-cycle counters instead of ns/$time for all latency/throughput logs
 //////////////////////////////////////////////////////////////////////////////////
 
 module test_AES128();
 
-    parameter CLK_PERIOD = 25;     // 50 MHz
-    parameter NUM_BLOCKS = 15;     
+    parameter CLK_PERIOD = 25;     // 50 MHz (used only to generate clk)
+    parameter NUM_BLOCKS = 15;
 
     reg  [127:0] data;
     reg  [127:0] key;
     reg clk, reset;
     wire [127:0] out;
     wire done;
-     wire key_ready;
+    wire key_ready;
 
     // DUT Instance
     AESEncrypt128_DUT aes (
@@ -32,13 +33,31 @@ module test_AES128();
         forever #(CLK_PERIOD/2) clk = ~clk;
     end
 
+    // =========================
+    // Cycle counters / markers
+    // =========================
+    integer cycle;             // free-running cycle counter (counts posedges after reset deassert)
+    integer start_cycle;       // cycle when reset is deasserted
+    integer first_out_cycle;   // cycle when the first valid 'done' occurs
+    integer last_out_cycle;    // cycle of the most recent 'done'
+    reg     seen_first_out;
+
+    // free-running cycle counter
+    always @(posedge clk) begin
+        if (reset) begin
+            cycle <= 0;
+        end else begin
+            cycle <= cycle + 1;
+        end
+    end
+
     // Test Vectors
     reg [127:0] data_vec [0:NUM_BLOCKS-1];
     reg [127:0] out_vec  [0:NUM_BLOCKS-1];
     reg [127:0] expected_cipher [0:NUM_BLOCKS-1];
     integer i;
 
-    // FIFO to track inputs for matching outputs
+    // FIFO to track inputs for matching outputs (kept from your original)
     reg [127:0] fifo [0:NUM_BLOCKS-1];
     integer fifo_head = 0;
     integer fifo_tail = 0;
@@ -89,7 +108,8 @@ module test_AES128();
             if (input_index < NUM_BLOCKS && key_ready) begin
                 data <= data_vec[input_index];
                 fifo[fifo_head] <= data_vec[input_index];
-                $display("Input #%0d applied @ %0t ns : %032x", input_index, $time, data_vec[input_index]);
+                $display("Input  #%0d applied @ cycle %0d : %032x",
+                         input_index, cycle, data_vec[input_index]);
                 input_index <= input_index + 1;
                 fifo_head <= fifo_head + 1;
             end else begin
@@ -104,15 +124,21 @@ module test_AES128();
         if (!reset && done) begin
             out_vec[output_index] = out;
 
+            if (!seen_first_out) begin
+                first_out_cycle <= cycle;
+                seen_first_out  <= 1'b1;
+            end
+            last_out_cycle <= cycle;
+
             if (^out === 1'bx) begin
-                $display("Output #%0d @ %0t ns : DUT produced X's ❌ (Possible RTL bug)",
-                         output_index, $time);
+                $display("Output #%0d @ cycle %0d : DUT produced X's ❌ (Possible RTL bug)",
+                         output_index, cycle);
             end else if (out === expected_cipher[output_index]) begin
-                $display("Output #%0d @ %0t ns : %032x --> Correct ✅",
-                         output_index, $time, out);
+                $display("Output #%0d @ cycle %0d : %032x --> Correct ✅",
+                         output_index, cycle, out);
             end else begin
-                $display("Output #%0d @ %0t ns : %032x --> Incorrect ❌ (Expected: %032x)",
-                         output_index, $time, out, expected_cipher[output_index]);
+                $display("Output #%0d @ cycle %0d : %032x --> Incorrect ❌ (Expected: %032x)",
+                         output_index, cycle, out, expected_cipher[output_index]);
             end
 
             output_index = output_index + 1;
@@ -120,27 +146,44 @@ module test_AES128();
         end
     end
 
-    // Test sequence
-    time start_time, first_out_time;
+    // Test sequence (cycle-only reporting)
+    real cycles_per_block;
     initial begin
-        $display("=== AES-128 PIPELINED ENCRYPTION TEST ===");
+        $display("=== AES-128 PIPELINED ENCRYPTION TEST (Cycle-Based) ===");
         $display("Key: %h", key);
-        $display("Clock: %0d ns period\n", CLK_PERIOD);
+        $display("Clock period param (ignored for logs): %0d", CLK_PERIOD);
 
+        // Synchronous reset
         reset = 1;
-        #100;
-        reset = 0;
-        start_time = $time;
-        $display("Reset deasserted at %0t ns\n", start_time);
+        seen_first_out = 1'b0;
+        start_cycle = 0;
+        first_out_cycle = 0;
+        last_out_cycle  = 0;
 
-        // Wait for all outputs
+        // Hold reset for a few cycles, then release
+        repeat (4) @(posedge clk);
+        reset = 0;
+        start_cycle = cycle;  // mark the cycle immediately after deassertion
+        $display("Reset deasserted at cycle %0d\n", start_cycle);
+
+        // Wait for all outputs to be observed
         wait (output_index == NUM_BLOCKS);
-        $display("\n=== AES-128 PIPELINE PERFORMANCE REPORT ===");
-        $display("Total Inputs : %0d", NUM_BLOCKS);
-        $display("Latency (ns) : %0t", first_out_time - start_time);
-        $display("Latency (cycles): %0d", (first_out_time - start_time) / CLK_PERIOD);
-        $display("Throughput   : 1 block per %0d ns (%.2f blocks/sec)", CLK_PERIOD, 1.0e9 / CLK_PERIOD);
-        $display("Simulation End @ %0t ns", $time);
+
+        // Performance report (all in cycles)
+        $display("\n=== AES-128 PIPELINE PERFORMANCE REPORT (Cycles) ===");
+        $display("Total Inputs        : %0d", NUM_BLOCKS);
+        $display("First Output Cycle  : %0d", first_out_cycle);
+        $display("Start Cycle         : %0d", start_cycle);
+        $display("Latency (cycles)    : %0d", (first_out_cycle - start_cycle));
+        $display("Last Output Cycle   : %0d", last_out_cycle);
+
+        // Average throughput in cycles/block measured from first->last outputs
+        if (NUM_BLOCKS > 0) begin
+            cycles_per_block = (last_out_cycle - first_out_cycle + 1.0) / NUM_BLOCKS;
+            $display("Avg Throughput      : %.3f cycles/block", cycles_per_block);
+        end
+
+        $display("Simulation End @ cycle %0d", cycle);
         $finish;
     end
 
